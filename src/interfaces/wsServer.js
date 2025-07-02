@@ -1,11 +1,23 @@
 import { WebSocketServer } from 'ws';
 import { updateUserLocation } from '../application/updateUserLocation.js';
-import { getNearbyUsers } from '../application/getNearbyUsers.js'; // <-- asegúrate de tener esta línea
+import { getNearbyUsers } from '../application/getNearbyUsers.js';
 import dotenv from 'dotenv';
+
+// --- NUEVO: Importa los manejadores de negociación ---
+import {
+  handleServiceProposal,
+  handleCounterOffer,
+  handleAcceptOffer,
+  handleCancelNegotiation
+} from '../handlers/negotiationHandler.js';
+
 dotenv.config();
 
+// --- NUEVO: Mapa para rastrear las conexiones activas ---
+const connectedClients = new Map();
+
 export function initWebSocketServer(server) {
-   const wss = new WebSocketServer({ server }); // Usa el mismo servidor
+  const wss = new WebSocketServer({ server });
 
   wss.on('connection', (ws) => {
     console.log('📡 Cliente conectado');
@@ -14,33 +26,43 @@ export function initWebSocketServer(server) {
       try {
         const data = JSON.parse(message);
 
-        if (data.action === 'getNearbyByUserId') {
-          // Busca usuarios cercanos basados en userId
-          if (!data.userId) throw new Error('Falta userId para buscar cercanos por usuario');
-          const radius = data.radius || 10;
-          const nearby = await getNearbyUsers({ userId: data.userId, radius });
-          ws.send(JSON.stringify({ nearby }));
-        } else if (data.action === 'getNearbyByCoords') {
-          // Busca usuarios cercanos basado en lat/lon
-          if (typeof data.lat === 'undefined' || typeof data.lon === 'undefined') {
-            throw new Error('Faltan lat y lon para buscar cercanos por coordenadas.');
-          }
-          const radius = data.radius || 10;
-          const nearbyRaw = await findNearbyUsers({ lon: data.lon, lat: data.lat, radius });
-          // nearbyRaw viene en formato [ [userId, dist, [lon, lat]], ... ]
-          const nearby = nearbyRaw.map(([id, dist, [lon, lat]]) => ({
-            userId: id,
-            distance: parseFloat(dist),
-            lat: parseFloat(lat),
-            lon: parseFloat(lon),
-          }));
-          ws.send(JSON.stringify({ nearby }));
-        } else if (data.userId && typeof data.lat !== 'undefined' && typeof data.lon !== 'undefined') {
-          await updateUserLocation(data);
-          console.log(`📍 Ubicación actualizada para ${data.userId}: ${data.lat}, ${data.lon}`);
-          ws.send(JSON.stringify({ success: true }));
-        } else {
-          throw new Error('Datos no reconocidos: se esperaba action=getNearbyByUserId o getNearbyByCoords, o userId+lat+lon.');
+        // --- MODIFICADO: Asocia el userId con la conexión ws ---
+        // Esto es clave para poder enviar mensajes a usuarios específicos
+        if (data.userId) {
+          connectedClients.set(data.userId.toString(), ws);
+        }
+
+        // --- MODIFICADO: Router de acciones ---
+        switch (data.action) {
+          // Casos de negociación
+          case 'propose_service':
+            await handleServiceProposal(data, connectedClients);
+            break;
+          case 'counter_offer':
+            await handleCounterOffer(data, connectedClients);
+            break;
+          case 'accept_offer':
+            await handleAcceptOffer(data, connectedClients);
+            break;
+          case 'cancel_negotiation':
+            await handleCancelNegotiation(data, connectedClients);
+            break;
+
+          // Casos existentes de geolocalización
+          case 'getNearbyByUserId':
+            if (!data.userId) throw new Error('Falta userId para buscar cercanos');
+            const nearby = await getNearbyUsers({ userId: data.userId, radius: data.radius || 10 });
+            ws.send(JSON.stringify({ nearby }));
+            break;
+          
+          default:
+            // Lógica por defecto para actualizar la ubicación
+            if (data.userId && typeof data.lat !== 'undefined' && typeof data.lon !== 'undefined') {
+              await updateUserLocation(data);
+              // No es necesario enviar una respuesta de éxito para cada actualización
+            } else {
+              throw new Error('Acción no reconocida o datos incompletos.');
+            }
         }
       } catch (err) {
         console.error('❌ Error procesando mensaje:', err.message);
@@ -48,11 +70,18 @@ export function initWebSocketServer(server) {
       }
     });
 
-
     ws.on('close', () => {
       console.log('🔌 Cliente desconectado');
+      // --- NUEVO: Limpia el mapa cuando un cliente se desconecta ---
+      for (const [userId, clientWs] of connectedClients.entries()) {
+        if (clientWs === ws) {
+          connectedClients.delete(userId);
+          console.log(`Cliente ${userId} eliminado de conexiones activas.`);
+          break;
+        }
+      }
     });
   });
 
-  console.log(`🛰️ Servidor WS corriendo en puerto ${process.env.PORT}`);
+  console.log(`🛰️ Servidor WS iniciado.`);
 }

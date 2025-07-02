@@ -37,7 +37,7 @@
 
     function connectWS() {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
-        ws = new WebSocket('ws://localhost:3001');
+        ws = new WebSocket('https://websocket-l3gn.onrender.com');
 
         ws.onopen = () => {
           console.log('Conectado al WS');
